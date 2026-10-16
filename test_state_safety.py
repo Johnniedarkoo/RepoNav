@@ -67,6 +67,14 @@ class SafetyTests(unittest.TestCase):
         self.write('.serena/project.yml','[not, a, mapping]')
         with self.assertRaises(safety.StateSafetyError): safety.inspect_state(self.root,'serena')
 
+    def test_comment_only_local_override_accepted(self):
+        # Serena 1.7.0 creates project.local.yml as a commented template.
+        self.write('.serena/project.yml','project_name: x\nlanguage_servers: [python]\n')
+        self.write('.serena/project.local.yml','# local overrides\n')
+        self.assertTrue(safety.inspect_state(self.root,'serena')['serena']['config'])
+        self.write('.serena/project.local.yml','[not, a, mapping]')
+        with self.assertRaises(safety.StateSafetyError): safety.inspect_state(self.root,'serena')
+
     def test_configuration_directory(self):
         (self.root/'.serena/project.yml').mkdir(parents=True)
         with self.assertRaises(safety.StateSafetyError): safety.inspect_state(self.root,'serena')
