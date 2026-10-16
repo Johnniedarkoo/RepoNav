@@ -1,8 +1,24 @@
 # RepoNav
 
-RepoNav is a small Windows command-line helper that prepares repository navigation tools in a Git working tree. Serena provides symbol navigation through language servers; Graphify maps code relationships; RepoNav checks their installations, initializes missing state, and reports when a code graph needs refreshing.
+**Keep repository navigation ready without repeatedly rebuilding indexes or managing two tools by hand.**
 
-Use it when you want the same navigation setup across several repositories without repeating setup commands yourself.
+[Serena](https://github.com/oraios/serena) and Graphify help you understand code in different ways: Serena provides symbol navigation through language servers, while Graphify maps relationships in the codebase. Using both is useful; keeping their state initialized, current, and predictable across repositories takes extra work.
+
+**RepoNav manages that lifecycle.** It inspects the tools and existing repository state, initializes what's missing, identifies stale graphs, and provides an explicit incremental refresh. It also checks for unexpected file changes and potentially unsafe existing state.
+
+## Why RepoNav instead of running both tools yourself?
+
+- **Avoid unnecessary rebuilds.** `ensure` initializes missing navigation state but does not rebuild an existing Graphify graph just because you ran it again.
+- **Refresh deliberately.** `status` shows when a graph needs attention; `refresh` uses Graphify's native incremental operation to reconcile added, changed, and deleted code.
+- **Handle more than one repository.** `bootstrap-all` discovers repositories beneath specified directories and processes them sequentially, with a dry-run option.
+- **Respect existing work.** RepoNav preserves existing state where it safely can, checks for unexpected changes to tracked and agent-policy files, and refuses certain unsafe caches or filesystem redirections.
+- **See what needs attention.** A single command reports dependency availability and repository navigation state.
+
+**Without RepoNav:** check both tools and their state yourself, decide whether initialization or a graph update is needed, and repeat the process for each repository.
+
+**With RepoNav:** use `status` to inspect, `ensure` to fill in missing state, and `refresh` when you want Graphify to update an existing graph. Use `bootstrap-all` for multiple repositories.
+
+RepoNav **does not install or replace Serena and Graphify**, combine them into a new search engine, or automatically keep graphs refreshed in the background. It coordinates separately installed tools and makes initialization, inspection, and maintenance explicit.
 
 **v0.1.0 is an initial experimental release:** safe regression and launcher checks pass, but real Serena indexing and Graphify indexing/refresh after hardening remain unverified. Fresh-machine dependency installation is also unverified.
 
