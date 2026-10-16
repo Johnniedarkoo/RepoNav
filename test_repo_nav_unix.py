@@ -75,6 +75,39 @@ class PathSafetyTests(UnixTestCase):
             repo_nav.assert_ordinary_write_target(self.base / 'link' / 'exclude')
 
 
+class SerenaTemporaryTests(UnixTestCase):
+    def temporary(self, token='a' * 32):
+        temporary = self.base / f'reponav-serena-{token}'
+        (temporary / 'home' / 'node_modules' / '.bin').mkdir(parents=True)
+        (temporary / '.owner').write_text(token)
+        return temporary, token
+
+    def test_npm_links_removed_without_following(self):
+        temporary, token = self.temporary()
+        outside = self.base / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('keep')
+        (temporary / 'home' / 'node_modules' / '.bin' / 'tool').symlink_to(outside / 'keep.txt')
+        (temporary / 'home' / 'linked-dir').symlink_to(outside, target_is_directory=True)
+        repo_nav.remove_serena_temporary(self.base, token)
+        self.assertFalse(temporary.exists())
+        self.assertEqual((outside / 'keep.txt').read_text(), 'keep')
+
+    def test_links_refused_without_safe_rmtree(self):
+        temporary, token = self.temporary()
+        (temporary / 'home' / 'node_modules' / '.bin' / 'tool').symlink_to(self.base)
+        with patch.object(repo_nav.shutil.rmtree, 'avoids_symlink_attacks', False):
+            with self.assertRaisesRegex(repo_nav.RepoNavError, 'cleanup refused'):
+                repo_nav.remove_serena_temporary(self.base, token)
+        self.assertTrue(temporary.exists())
+
+    def test_foreign_marker_refused(self):
+        temporary, token = self.temporary()
+        (temporary / '.owner').write_text('someone else')
+        with self.assertRaisesRegex(repo_nav.RepoNavError, 'ownership marker'):
+            repo_nav.remove_serena_temporary(self.base, token)
+        self.assertTrue(temporary.exists())
+
 class PreservationGuardTests(UnixTestCase):
     def guarded(self, before, after, action=lambda: 'done'):
         with patch.object(repo_nav, 'tracked_snapshot', side_effect=[before, after]):

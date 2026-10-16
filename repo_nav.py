@@ -306,16 +306,25 @@ def safe_serena_index(root, arguments):
             raise RepoNavError('STATE SAFETY: executable cache appeared before Serena invocation.')
         return run(['serena', *arguments], cwd=root, env=env)
     finally:
-        if temporary.resolve() != base / f'reponav-serena-{token}':
-            raise RepoNavError('Unsafe Serena temporary cleanup target')
-        marker = temporary / '.owner'
-        if stat.S_ISLNK(marker.lstat().st_mode) or marker.read_text(encoding='utf-8').strip() != token:
-            raise RepoNavError('Unsafe Serena temporary ownership marker')
+        remove_serena_temporary(base, token)
+
+
+def remove_serena_temporary(base, token):
+    temporary = base / f'reponav-serena-{token}'
+    if stat.S_ISLNK(temporary.lstat().st_mode) or temporary.resolve() != temporary:
+        raise RepoNavError('Unsafe Serena temporary cleanup target')
+    marker = temporary / '.owner'
+    if stat.S_ISLNK(marker.lstat().st_mode) or marker.read_text(encoding='utf-8').strip() != token:
+        raise RepoNavError('Unsafe Serena temporary ownership marker')
+    # Language-server installs leave npm's node_modules/.bin symlinks here.
+    # Where rmtree is symlink-attack safe it unlinks links without following
+    # them; elsewhere keep refusing, as repo-nav.ps1 does for reparse points.
+    if not shutil.rmtree.avoids_symlink_attacks:
         for directory, subdirectories, files in os.walk(temporary):
             for name in subdirectories + files:
                 if stat.S_ISLNK(os.lstat(os.path.join(directory, name)).st_mode):
                     raise RepoNavError('Linked Serena temporary artifact retained; cleanup refused')
-        shutil.rmtree(temporary)
+    shutil.rmtree(temporary)
 
 
 def ensure_serena(root, languages=None):
