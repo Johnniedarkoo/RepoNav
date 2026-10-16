@@ -44,3 +44,7 @@ repo-nav
 repo_nav.py
 test_repo_nav_unix.py
 validate-unix.sh
+
+# Linux/macOS auto-refresh, agent wiring and tested version pairs.
+repo-nav-skill.md
+supported-versions.json

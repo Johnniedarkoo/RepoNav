@@ -11,7 +11,10 @@ import os
 from pathlib import Path
 import re
 import secrets
+import selectors
+import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -19,10 +22,29 @@ import tempfile
 import time
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
-USAGE = 'Usage: repo-nav ensure [--languages a,b] | status | refresh | bootstrap-all [--dry-run] <root> [<root2> ...]'
+USAGE = '\n'.join((
+    'Usage: repo-nav ensure [--languages a,b] | status | refresh [--quiet] [--background]',
+    '       repo-nav setup [--languages a,b]          ensure + hooks install + agent install',
+    '       repo-nav hooks install | uninstall | status',
+    '       repo-nav agent install | uninstall | status | context',
+    '       repo-nav skill install | uninstall | status      user-wide skill for Claude, Codex, pi, OpenClaw',
+    '       repo-nav watch [--debounce SECONDS]',
+    '       repo-nav upgrade [--dry-run] | upgrade --self [--dry-run]',
+    '       repo-nav bootstrap-all [--dry-run] <root> [<root2> ...]'))
 BOOTSTRAP_USAGE = 'Usage: repo-nav bootstrap-all [--dry-run] <root> [<root2> ...]'
 STATE_ENTRIES = ('.serena/', 'graphify-out/')
-SUPPORTED = (('serena-agent', '1.7.0', 'serena'), ('graphifyy', '0.9.72', 'graphify'))
+LAUNCHERS = (('serena-agent', 'serena'), ('graphifyy', 'graphify'))
+HOOK_NAMES = ('post-commit', 'post-merge', 'post-checkout', 'post-rewrite')
+HOOK_BEGIN = '# >>> repo-nav >>>'
+HOOK_END = '# <<< repo-nav <<<'
+SHELL_INTERPRETERS = {'sh', 'bash', 'dash', 'zsh', 'ksh'}
+AGENT_SETTINGS = '.claude/settings.local.json'
+AGENT_COMMAND = re.compile(r"repo-nav'? agent context$")
+# Variables a Git hook may export that would point a detached refresh at a
+# temporary index or another repository.
+GIT_REDIRECTS = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
+                 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX', 'GIT_REFLOG_ACTION')
+LOG_LIMIT = 256 * 1024
 
 # Default server IDs/extensions verified against installed Serena 1.7.0.
 LANGUAGE_EXTENSIONS = {
@@ -250,13 +272,22 @@ def tool_info(name):
     return {'available': code == 0 or name == 'rg', 'version': output[0].strip() if output else 'available', 'path': path}
 
 
+def supported_versions():
+    return json.loads((SCRIPT_ROOT / 'supported-versions.json').read_text(encoding='utf-8'))
+
+
+def check_dependency(distribution, launcher, versions):
+    return run([tool_python(distribution), '-B', SCRIPT_ROOT / 'check_dependencies.py',
+                distribution, '|'.join(versions), launcher, shutil.which(launcher) or launcher])
+
+
 def assert_supported_dependencies():
     for name in ('git', 'uv', 'rg', 'serena', 'graphify'):
         if shutil.which(name) is None:
             raise RepoNavError(f'Missing prerequisite: {name}. See INSTALL.md. No software was installed.')
-    for distribution, version, launcher in SUPPORTED:
-        code, output = run([tool_python(distribution), '-B', SCRIPT_ROOT / 'check_dependencies.py',
-                            distribution, version, launcher, shutil.which(launcher)])
+    tested = supported_versions()['tested']
+    for distribution, launcher in LAUNCHERS:
+        code, output = check_dependency(distribution, launcher, sorted({pair[distribution] for pair in tested}))
         if code != 0:
             raise RepoNavError('\n'.join(output))
 
@@ -412,11 +443,11 @@ def ensure_graphify(root):
     return 'initialized and built'
 
 
-def graphify_refresh(root):
+def graphify_refresh(root, quiet=False):
     state_safety(root, 'graphify', 'refresh')
     code, output = run([tool_python('graphifyy'), SCRIPT_ROOT / 'graphify-state.py', 'refresh', root],
                        cwd=root, env=in_repository_env())
-    for line in output:
+    for line in (output[-1:] if quiet and code == 0 else output):
         print(line)
     if code != 0:
         raise RepoNavError('Graphify incremental refresh failed; inspect its diagnostics before retrying.')
@@ -441,9 +472,12 @@ def graphify_hook_status(root):
 
 def ensure_graphify_hooks(root):
     state_safety(root, 'graphify', 'inspect')
+    if hooks_state(root)['installed']:
+        return 'auto-refresh hooks installed'
     if graphify_hook_status(root) and graphify_attribute_state(root)['graphify_line']:
         return 'hooks installed'
-    return 'not installed — Graphify hook install also writes .gitattributes; no Git-local-only installer is available'
+    return ('not installed — run repo-nav hooks install for Git-local auto-refresh '
+            '(Graphify hook install also writes .gitattributes)')
 
 
 # --- commands --------------------------------------------------------------
@@ -469,8 +503,9 @@ def write_status(root):
     if safety['graphify']['category'] == 'unclear-ownership':
         graph_text += '; existing output preserved; ownership review required before initialization'
     hooks = stage('Graphify hooks', root, lambda: graphify_hook_status(root))
-    hook_text = ('hooks installed' if hooks else 'not installed — .gitattributes conflict'
-                 if graphify_attribute_state(root)['other_content'] else 'not installed')
+    hook_text = ('auto-refresh hooks installed' if hooks_state(root)['installed'] else 'hooks installed' if hooks
+                 else 'not installed — .gitattributes conflict' if graphify_attribute_state(root)['other_content']
+                 else 'not installed')
     print(f'Serena project: {serena_text}')
     print(f'Serena Codex MCP: {format_serena_mcp_state(serena_mcp_state())}')
     print(f'Graphify {graph_text}; {hook_text}')
@@ -481,6 +516,7 @@ def write_status(root):
         print(f'  {entry:<15} {mark}')
     local = 'optional generated entry: OK' if excludes['entries'].get('.gitattributes') else 'optional generated entry: unavailable / not needed'
     print(f'Repo-local exclusions ({excludes["path"]}): {local}')
+    print(f'Claude Code session context: {"installed" if agent_settings_state(root)["installed"] else "not installed"}')
 
 
 def ensure_repository(root, languages=None):
@@ -510,6 +546,596 @@ def ensure_repository(root, languages=None):
         warnings.append(hooks)
     warnings += [result for result in exclude_results if re.search(r'tracked; not excluded|^WARNING:', result)]
     return {'tools': tools, 'serena': serena, 'mcp': mcp, 'graph': graph, 'hooks': hooks, 'warnings': warnings}
+
+
+# --- auto-refresh: locked and background refresh ---------------------------
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def acquire_refresh_lock(root):
+    """Per-worktree lock; a refresh requested while one runs queues one more pass."""
+    lock = git_path(root, 'repo-nav-refresh.lock')
+    for _ in range(2):
+        try:
+            lock.mkdir()
+            (lock / 'pid').write_text(str(os.getpid()), encoding='utf-8')
+            return lock
+        except FileExistsError:
+            try:
+                pid = int((lock / 'pid').read_text(encoding='utf-8').strip())
+            except (OSError, ValueError):
+                pid = None
+            if pid is not None and process_alive(pid):
+                return None
+            # Owner exited without cleanup: take the lock over.
+            for child in lock.iterdir():
+                child.unlink()
+            lock.rmdir()
+    return None
+
+
+def release_refresh_lock(lock):
+    for child in lock.iterdir():
+        child.unlink()
+    lock.rmdir()
+
+
+def locked_refresh(root, quiet=False):
+    rerun = git_path(root, 'repo-nav-refresh.rerun')
+    lock = acquire_refresh_lock(root)
+    if lock is None:
+        rerun.touch()
+        print('refresh already running; one more pass queued')
+        return
+    try:
+        while True:
+            if rerun.exists():
+                rerun.unlink()
+            guarded(root, 'Graphify graph refresh (graphify-state.py refresh)',
+                    lambda: stage('Graphify graph refresh', root, lambda: graphify_refresh(root, quiet)))
+            if not rerun.exists():
+                break
+    finally:
+        release_refresh_lock(lock)
+
+
+def start_background_refresh(root):
+    """Detach a quiet refresh so Git hooks and agent start-up never wait for it."""
+    for name in GIT_REDIRECTS:
+        os.environ.pop(name, None)
+    log = git_path(root, 'repo-nav.log')
+    try:
+        if log.stat().st_size > LOG_LIMIT:
+            log.write_bytes(log.read_bytes()[-LOG_LIMIT // 4:])
+    except FileNotFoundError:
+        pass
+    with open(log, 'ab') as stream:
+        stream.write(f'--- {time.strftime("%Y-%m-%d %H:%M:%S")} refresh\n'.encode('utf-8'))
+        stream.flush()
+        subprocess.Popen([sys.executable, '-B', str(SCRIPT_ROOT / 'repo_nav.py'), 'refresh', '--quiet'],
+                         cwd=root, env=dict(os.environ), stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+    return log
+
+
+# --- auto-refresh: Git-local hooks -----------------------------------------
+
+def hooks_directory(root):
+    directory = git_path(root, 'hooks')
+    common = git_path(root, '.')
+    resolved = Path(os.path.realpath(directory))
+    inside_worktree = Path(os.path.realpath(root)) in (resolved, *resolved.parents)
+    inside_git = Path(os.path.realpath(common)) in (resolved, *resolved.parents)
+    if inside_worktree and not inside_git:
+        raise RepoNavError(f'core.hooksPath points inside the work tree ({directory}); refusing to write hooks that '
+                           'could be tracked. Add "repo-nav refresh --background --quiet" to your hook manager instead.')
+    return directory
+
+
+def hook_block(name):
+    command = f'{shlex.quote(str(SCRIPT_ROOT / "repo-nav"))} refresh --background --quiet >/dev/null 2>&1'
+    condition = '[ -f "$(git rev-parse --show-toplevel 2>/dev/null)/graphify-out/graph.json" ]'
+    if name == 'post-checkout':
+        condition = '[ "${3:-0}" = 1 ] && ' + condition  # branch switches only, not file checkouts
+    return '\n'.join((HOOK_BEGIN, '# Git-local auto-refresh of the RepoNav code graph; remove with: repo-nav hooks uninstall',
+                      f'{condition} && {command} || true', HOOK_END)) + '\n'
+
+
+def shell_hook(text):
+    first = text.split('\n', 1)[0]
+    if not first.startswith('#!'):
+        return False
+    words = first[2:].split()
+    if words and os.path.basename(words[0]) == 'env':
+        words = [word for word in words[1:] if not word.startswith('-')]
+    return bool(words) and os.path.basename(words[0]) in SHELL_INTERPRETERS
+
+
+def without_block(text):
+    pattern = re.compile(re.escape(HOOK_BEGIN) + r'\n.*?' + re.escape(HOOK_END) + r'\n', re.S)
+    return pattern.sub('', text)
+
+
+def hooks_state(root):
+    try:
+        directory = hooks_directory(root)
+    except RepoNavError as error:
+        return {'installed': False, 'hooks': {}, 'error': str(error)}
+    hooks = {}
+    for name in HOOK_NAMES:
+        path = directory / name
+        try:
+            text = path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            hooks[name] = 'missing'
+            continue
+        except (OSError, UnicodeError):
+            hooks[name] = 'unreadable'
+            continue
+        hooks[name] = ('installed' if HOOK_BEGIN in text and os.access(path, os.X_OK) else
+                       'missing' if shell_hook(text) else 'foreign hook (not a shell script)')
+    return {'installed': all(state == 'installed' for state in hooks.values()), 'hooks': hooks, 'directory': directory}
+
+
+def hooks_install(root):
+    directory = hooks_directory(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for name in HOOK_NAMES:
+        path = directory / name
+        assert_ordinary_write_target(path)
+        block = hook_block(name)
+        if path.exists():
+            text = path.read_text(encoding='utf-8')
+            if not shell_hook(text):
+                lines.append(f'{name}: skipped — existing hook is not a shell script; add '
+                             '"repo-nav refresh --background --quiet" to it yourself')
+                continue
+            updated = without_block(text)
+            shebang, _, rest = updated.partition('\n')
+            # Directly after the shebang, so an "exit 0" in the existing hook
+            # cannot skip it; the block itself never fails or blocks.
+            updated = shebang + '\n' + block + rest
+            if updated == text:
+                lines.append(f'{name}: already installed')
+                continue
+            path.write_text(updated, encoding='utf-8')
+            lines.append(f'{name}: added to existing hook')
+        else:
+            path.write_text('#!/bin/sh\n' + block, encoding='utf-8')
+            lines.append(f'{name}: installed')
+        path.chmod(path.stat().st_mode | 0o111)
+    return lines
+
+
+def hooks_uninstall(root):
+    directory = hooks_directory(root)
+    lines = []
+    for name in HOOK_NAMES:
+        path = directory / name
+        try:
+            text = path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            continue
+        if HOOK_BEGIN not in text:
+            continue
+        assert_ordinary_write_target(path)
+        updated = without_block(text)
+        if updated.strip() == '#!/bin/sh':
+            path.unlink()
+            lines.append(f'{name}: removed')
+        else:
+            path.write_text(updated, encoding='utf-8')
+            lines.append(f'{name}: repo-nav block removed; existing hook kept')
+    return lines or ['no repo-nav hooks found']
+
+
+def hooks_command(root, arguments):
+    if arguments == ['install']:
+        lines = hooks_install(root)
+    elif arguments == ['uninstall']:
+        lines = hooks_uninstall(root)
+    elif arguments == ['status']:
+        state = hooks_state(root)
+        if 'error' in state:
+            raise RepoNavError(state['error'])
+        print(f'Hooks directory: {state["directory"]}')
+        lines = [f'{name}: {status}' for name, status in state['hooks'].items()]
+    else:
+        print(USAGE)
+        return 2
+    for line in lines:
+        print(line)
+    return 0
+
+
+# --- agent wiring (Claude Code) --------------------------------------------
+
+def agent_settings_state(root):
+    path = Path(root) / AGENT_SETTINGS
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {'path': path, 'data': {}, 'installed': False}
+    if not isinstance(data, dict):
+        raise RepoNavError(f'{path}: expected a JSON object')
+    installed = any(isinstance(hook, dict) and AGENT_COMMAND.search(str(hook.get('command', '')))
+                    for entry in (data.get('hooks') or {}).get('SessionStart') or []
+                    for hook in (entry.get('hooks') or [] if isinstance(entry, dict) else []))
+    return {'path': path, 'data': data, 'installed': installed}
+
+
+def write_json(path, data):
+    assert_ordinary_write_target(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f'.repo-nav-{secrets.token_hex(4)}')
+    temporary.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, path)
+
+
+def claude_serena(root):
+    claude = shutil.which('claude')
+    if claude is None:
+        return None, 'Claude Code CLI unavailable'
+    code, output = run([claude, 'mcp', 'get', 'serena'], cwd=root)
+    text = '\n'.join(output)
+    if code != 0 or 'No MCP server named' in text:
+        return claude, 'missing'
+    return claude, text
+
+
+def agent_install(root):
+    if is_tracked(root, AGENT_SETTINGS):
+        raise RepoNavError(f'{AGENT_SETTINGS} is tracked; refusing to edit a tracked agent policy file.')
+    lines = []
+    state = agent_settings_state(root)
+    if state['installed']:
+        lines.append(f'Session context: already installed ({state["path"]})')
+    else:
+        data = state['data']
+        entries = data.setdefault('hooks', {}).setdefault('SessionStart', [])
+        entries.append({'hooks': [{'type': 'command', 'command': f'{shlex.quote(str(SCRIPT_ROOT / "repo-nav"))} agent context',
+                                   'timeout': 30}]})
+        write_json(state['path'], data)
+        lines.append(f'Session context: SessionStart hook added to {state["path"]}')
+    code, _ = run(['git', 'check-ignore', '-q', AGENT_SETTINGS], cwd=root)
+    if code != 0:
+        lines.append('Session context: ' + ensure_local_exclude(root, git_path(root, 'info/exclude'), AGENT_SETTINGS))
+    claude, serena = claude_serena(root)
+    if claude is None:
+        lines.append(f'Serena MCP: skipped — {serena}')
+    elif serena != 'missing':
+        lines.append('Serena MCP: already configured; left unchanged')
+    else:
+        code, output = run([claude, 'mcp', 'add', '--scope', 'local', 'serena', '--', shutil.which('serena') or 'serena',
+                            'start-mcp-server', '--context', 'claude-code', '--project', root,
+                            '--open-web-dashboard', 'False'], cwd=root)
+        if code != 0:
+            raise RepoNavError('Claude Code MCP registration failed:\n' + '\n'.join(output))
+        lines.append('Serena MCP: registered for this repository (Claude Code local scope)')
+    return lines
+
+
+def agent_uninstall(root):
+    lines = []
+    state = agent_settings_state(root)
+    if state['installed']:
+        data = state['data']
+        hooks = data['hooks']
+        kept = []
+        for entry in hooks['SessionStart']:
+            remaining = [hook for hook in entry.get('hooks') or [] if not AGENT_COMMAND.search(str(hook.get('command', '')))]
+            if remaining:
+                kept.append(dict(entry, hooks=remaining))
+        if kept:
+            hooks['SessionStart'] = kept
+        else:
+            del hooks['SessionStart']
+            if not hooks:
+                del data['hooks']
+        if data:
+            write_json(state['path'], data)
+        else:
+            state['path'].unlink()
+        lines.append(f'Session context: removed from {state["path"]}')
+    claude, serena = claude_serena(root)
+    # Only remove the registration RepoNav itself made.
+    if claude is not None and serena != 'missing' and '--context claude-code' in serena and f'--project {root}' in serena:
+        code, output = run([claude, 'mcp', 'remove', 'serena', '--scope', 'local'], cwd=root)
+        lines.append('Serena MCP: removed' if code == 0 else 'Serena MCP: removal failed: ' + ' '.join(output))
+    return lines or ['nothing to remove']
+
+
+def agent_context(root):
+    """One line of context for a new agent session; returns at once.
+
+    Checking freshness means loading the whole graph (seconds on large
+    repositories), so the line only says the graph exists and a detached
+    refresh brings it up to date; that refresh is a no-op when nothing changed.
+    """
+    graph = Path(root) / 'graphify-out' / 'graph.json'
+    if not graph.is_file():
+        print('repo-nav: no code graph in this repository yet; `repo-nav setup` builds one (ask the user first).')
+        return 0
+    try:
+        start_background_refresh(root)
+        freshness = 'it refreshes itself in the background when code changed'
+    except (OSError, RepoNavError):
+        freshness = 'run `repo-nav status` to check it is current'
+    print(f'repo-nav: this repository has a local code graph ({freshness}). For code questions, try '
+          '`graphify query "<question>"`, `graphify explain <Symbol>` or `graphify path <A> <B>` before grepping, '
+          'then open only the files they point to. If the Serena MCP server is connected, use find_symbol and '
+          'find_referencing_symbols for exact definitions and references. Both are local and cost no tokens.')
+    return 0
+
+
+def agent_command(root, arguments):
+    if arguments == ['context']:
+        return agent_context(root)
+    if arguments == ['install']:
+        lines = agent_install(root)
+    elif arguments == ['uninstall']:
+        lines = agent_uninstall(root)
+    elif arguments == ['status']:
+        state = agent_settings_state(root)
+        claude, serena = claude_serena(root)
+        lines = [f'Session context: {"installed" if state["installed"] else "not installed"} ({state["path"]})',
+                 'Serena MCP: ' + (serena if claude is None or serena == 'missing' else 'configured')]
+    else:
+        print(USAGE)
+        return 2
+    for line in lines:
+        print(line)
+    return 0
+
+
+# --- agent skill (all harnesses) ------------------------------------------
+# One SKILL.md, installed per user rather than per repository, so no tracked
+# policy file is touched. ~/.agents/skills is the Agent Skills location (read
+# by pi and other spec-compliant harnesses); Claude Code and Codex read their
+# own folders; OpenClaw's folder is used only when OpenClaw is installed.
+
+SKILL_SOURCE = SCRIPT_ROOT / 'repo-nav-skill.md'
+SKILL_MARKER = '<!-- Managed by repo-nav skill install'
+
+
+def skill_targets():
+    home = Path.home()
+    targets = [('Agent Skills (pi, OpenCode, ...)', home / '.agents' / 'skills'),
+               ('Claude Code', Path(os.environ.get('CLAUDE_CONFIG_DIR') or home / '.claude') / 'skills'),
+               ('Codex', Path(os.environ.get('CODEX_HOME') or home / '.codex') / 'skills')]
+    if (home / '.openclaw').is_dir():
+        targets.append(('OpenClaw', home / '.openclaw' / 'skills'))
+    return [(name, folder / 'repo-nav' / 'SKILL.md') for name, folder in targets]
+
+
+def skill_state(path, source):
+    try:
+        text = path.read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return 'not installed'
+    if SKILL_MARKER not in text:
+        return 'foreign skill named repo-nav'
+    return 'installed' if text == source else 'outdated'
+
+
+def skill_command(arguments):
+    source = SKILL_SOURCE.read_text(encoding='utf-8')
+    if arguments not in (['install'], ['uninstall'], ['status']):
+        print(USAGE)
+        return 2
+    for name, path in skill_targets():
+        state = skill_state(path, source)
+        if arguments == ['status']:
+            print(f'{name}: {state} ({path})')
+        elif state == 'foreign skill named repo-nav':
+            print(f'{name}: skipped — {path} exists and is not managed by RepoNav')
+        elif arguments == ['install']:
+            if state == 'installed':
+                print(f'{name}: already installed ({path})')
+                continue
+            assert_ordinary_write_target(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding='utf-8')
+            print(f'{name}: {"updated" if state == "outdated" else "installed"} ({path})')
+        elif state != 'not installed':
+            assert_ordinary_write_target(path)
+            path.unlink()
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+            print(f'{name}: removed ({path})')
+    return 0
+
+
+# --- watch -----------------------------------------------------------------
+
+WATCH_EXCLUDED = re.compile(r'(^|/)(\.git|graphify-out|\.serena|node_modules)(/|$)')
+
+
+def watch_source(root):
+    if shutil.which('fswatch'):
+        return 'fswatch', ['fswatch', '-r', '--latency', '0.5', '-e', r'/\.git/', '-e', '/graphify-out/',
+                           '-e', r'/\.serena/', '-e', '/node_modules/', root]
+    if shutil.which('inotifywait'):
+        return 'inotifywait', ['inotifywait', '-m', '-r', '-q', '-e', 'close_write,create,delete,move',
+                               '--format', '%w%f', '--exclude', r'/(\.git|graphify-out|\.serena|node_modules)(/|$)', root]
+    return 'polling', None
+
+
+def worktree_signature(root):
+    code, output = run(['git', 'status', '--porcelain=v1', '--untracked-files=normal'], cwd=root)
+    head = run(['git', 'rev-parse', 'HEAD'], cwd=root)[1]
+    stamps = []
+    for line in output:
+        path = Path(root) / line[3:].split(' -> ')[-1].strip('"')
+        try:
+            info = path.stat()
+            stamps.append((line, info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamps.append((line, 0, 0))
+    return code, head, stamps
+
+
+def watch_refresh(root):
+    state = graphify_state(root)
+    if not state['state'].startswith('stale'):
+        return
+    print(f'{time.strftime("%H:%M:%S")} {state["state"]}; refreshing')
+    try:
+        locked_refresh(root, quiet=True)
+    except RepoNavError as error:
+        print(f'{time.strftime("%H:%M:%S")} refresh failed: {error}')
+
+
+def stop_on_terminate(signum, frame):
+    raise KeyboardInterrupt
+
+
+def watch(root, debounce):
+    # Line-buffered so a log file follows along; SIGTERM stops it like Ctrl-C
+    # (background jobs ignore SIGINT).
+    sys.stdout.reconfigure(line_buffering=True)
+    signal.signal(signal.SIGTERM, stop_on_terminate)
+    name, command = watch_source(root)
+    print(f'Watching {root} with {name}; refreshing after {debounce:g}s without changes. Ctrl-C stops.')
+    watch_refresh(root)
+    process = None
+    try:
+        if command is None:
+            previous, changed_at = worktree_signature(root), None
+            while True:
+                time.sleep(min(debounce, 2.0))
+                current = worktree_signature(root)
+                if current != previous:
+                    previous, changed_at = current, time.monotonic()
+                elif changed_at is not None and time.monotonic() - changed_at >= debounce:
+                    changed_at = None
+                    watch_refresh(root)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        pending_since = None
+        while True:
+            ready = selector.select(debounce if pending_since is not None else None)
+            if ready:
+                line = process.stdout.readline()
+                if not line:
+                    raise RepoNavError(f'{name} stopped unexpectedly (exit {process.wait()}).')
+                relative = os.path.relpath(line.strip(), root)
+                if not WATCH_EXCLUDED.search(relative.replace(os.sep, '/')):
+                    pending_since = time.monotonic()
+            elif pending_since is not None and time.monotonic() - pending_since >= debounce:
+                pending_since = None
+                watch_refresh(root)
+    except KeyboardInterrupt:
+        print('Stopped watching.')
+        return 0
+    finally:
+        if process is not None:
+            process.terminate()
+
+
+# --- upgrade ---------------------------------------------------------------
+
+def installed_version(distribution):
+    try:
+        python = tool_python(distribution)
+    except RepoNavError:
+        return None
+    code, output = run([python, '-c', 'import importlib.metadata as m, sys; print(m.version(sys.argv[1]))', distribution])
+    return output[-1].strip() if code == 0 and output else None
+
+
+def install_tool(distribution, version, python):
+    code, output = run(['uv', 'tool', 'install', '--force', '--python', python, f'{distribution}=={version}'])
+    if code != 0:
+        raise RepoNavError(f'uv could not install {distribution} {version}:\n' + '\n'.join(output[-6:]))
+
+
+def upgrade_tools(dry_run):
+    if shutil.which('uv') is None:
+        raise RepoNavError('Missing prerequisite: uv. See INSTALL.md. No software was installed.')
+    supported = supported_versions()
+    target = supported['tested'][-1]
+    current = {distribution: installed_version(distribution) for distribution, _ in LAUNCHERS}
+    changes = [(distribution, current[distribution], target[distribution]) for distribution, _ in LAUNCHERS
+               if current[distribution] != target[distribution]]
+    if not changes:
+        print('Serena {} and Graphify {} are the newest tested pair; nothing to do.'.format(
+            target['serena-agent'], target['graphifyy']))
+        return 0
+    for distribution, old, new in changes:
+        print(f'{distribution}: {old or "not installed"} -> {new}')
+    if dry_run:
+        print('Dry run; nothing installed.')
+        return 0
+    done = []
+    try:
+        for distribution, old, new in changes:
+            install_tool(distribution, new, supported['python'][distribution])
+            done.append((distribution, old))
+        for distribution, launcher in LAUNCHERS:
+            code, output = check_dependency(distribution, launcher, [target[distribution]])
+            if code != 0:
+                raise RepoNavError('\n'.join(output))
+    except RepoNavError as error:
+        for distribution, old in reversed(done):
+            if old is not None:
+                install_tool(distribution, old, supported['python'][distribution])
+        raise RepoNavError(f'Upgrade failed; previous versions restored.\n{error}') from None
+    print('Upgrade complete; dependency and interface checks passed.')
+    return 0
+
+
+def upgrade_self(dry_run):
+    def git(*arguments):
+        return run(['git', '-C', SCRIPT_ROOT, *arguments])
+    code, output = git('rev-parse', '--is-inside-work-tree')
+    if code != 0 or output[:1] != ['true']:
+        raise RepoNavError(f'{SCRIPT_ROOT} is not a Git checkout; update it the way you installed it.')
+    code, output = git('status', '--porcelain', '--untracked-files=no')
+    if code != 0 or output:
+        raise RepoNavError(f'{SCRIPT_ROOT} has local changes; commit or remove them before updating.')
+    code, output = git('fetch', '--quiet')
+    if code != 0:
+        raise RepoNavError('git fetch failed:\n' + '\n'.join(output))
+    code, output = git('log', '--oneline', 'HEAD..@{u}')
+    if code != 0:
+        raise RepoNavError('The RepoNav checkout has no upstream branch to update from.')
+    if not output:
+        print('RepoNav is up to date.')
+        return 0
+    print('Incoming RepoNav changes:')
+    for line in output:
+        print(f'  {line}')
+    if dry_run:
+        print('Dry run; checkout unchanged.')
+        return 0
+    code, output = git('merge', '--ff-only', '--quiet', '@{u}')
+    if code != 0:
+        raise RepoNavError('Fast-forward update failed; checkout unchanged.\n' + '\n'.join(output))
+    print('RepoNav updated (fast-forward only). Review the changes above before your next run.')
+    return 0
+
+
+def upgrade(arguments):
+    options = set(arguments)
+    if not options <= {'--dry-run', '--self'} or len(options) != len(arguments):
+        print(USAGE)
+        return 2
+    if '--self' in options:
+        return upgrade_self('--dry-run' in options)
+    return upgrade_tools('--dry-run' in options)
 
 
 # --- bootstrap-all ---------------------------------------------------------
@@ -735,35 +1361,93 @@ def parse_languages(arguments):
     raise ValueError(USAGE)
 
 
+def parse_options(arguments, allowed):
+    options = set(arguments)
+    if not options <= allowed or len(options) != len(arguments):
+        raise ValueError(USAGE)
+    return options
+
+
+def parse_debounce(arguments):
+    if not arguments:
+        return 3.0
+    if len(arguments) == 2 and arguments[0] == '--debounce':
+        try:
+            value = float(arguments[1])
+        except ValueError:
+            value = 0
+        if 0.5 <= value <= 600:
+            return value
+    raise ValueError(USAGE)
+
+
+def print_ensure(root, result):
+    print(f'Repository: {root}')
+    print(f'rg        OK  {result["tools"]["rg"]["version"]}')
+    print(f'Serena project: {result["serena"]}')
+    print(f'Serena Codex MCP: {format_serena_mcp_state(result["mcp"])}')
+    print(f'Graphify  OK  {result["graph"]}; {result["hooks"]}')
+
+
 def main(argv):
     command, arguments = (argv[0], argv[1:]) if argv else ('ensure', [])
     try:
+        if command == 'upgrade':
+            return upgrade(arguments)
+        if command == 'skill':
+            return skill_command(arguments)
+        if command == 'agent' and arguments == ['context']:
+            # Runs at every agent session start: no dependency checks here;
+            # the detached refresh performs them.
+            return agent_context(repository_root())
+        if command == 'refresh' and '--background' in arguments:
+            # Called from Git hooks: return at once and leave the dependency
+            # checks and the refresh itself to the detached process.
+            parse_options(arguments, {'--background', '--quiet'})
+            for name in GIT_REDIRECTS:
+                os.environ.pop(name, None)  # before resolving the root, too
+            log = start_background_refresh(repository_root())
+            if '--quiet' not in arguments:
+                print(f'Refresh started in the background; log: {log}')
+            return 0
         assert_supported_dependencies()
         if command == 'bootstrap-all':
             return bootstrap_all(arguments)
-        if command not in ('ensure', 'status', 'refresh') or (arguments and command != 'ensure'):
+        if command not in ('ensure', 'setup', 'status', 'refresh', 'hooks', 'agent', 'watch'):
             print(USAGE)
             return 2
         try:
-            languages = parse_languages(arguments)
+            languages = parse_languages(arguments) if command in ('ensure', 'setup') else None
+            debounce = parse_debounce(arguments) if command == 'watch' else None
+            if command == 'refresh':
+                options = parse_options(arguments, {'--quiet'})
+            elif command == 'status' and arguments:
+                raise ValueError(USAGE)
         except ValueError as error:
             print(error)
             return 2
         root = repository_root()
         if command == 'refresh':
-            guarded(root, 'Graphify graph refresh (graphify-state.py refresh)',
-                    lambda: stage('Graphify graph refresh', root, lambda: graphify_refresh(root)))
+            locked_refresh(root, '--quiet' in options)
             return 0
+        if command == 'hooks':
+            return hooks_command(root, arguments)
+        if command == 'agent':
+            return agent_command(root, arguments)
+        if command == 'watch':
+            return watch(root, debounce)
         if command == 'status':
             require_tools()
             write_status(root)
             return 0
+        # Hooks first: they stay inert until ensure has built the graph.
+        setup = hooks_install(root) if command == 'setup' else []
         result = ensure_repository(root, languages)
-        print(f'Repository: {root}')
-        print(f'rg        OK  {result["tools"]["rg"]["version"]}')
-        print(f'Serena project: {result["serena"]}')
-        print(f'Serena Codex MCP: {format_serena_mcp_state(result["mcp"])}')
-        print(f'Graphify  OK  {result["graph"]}; {result["hooks"]}')
+        if command == 'setup':
+            setup += agent_install(root)
+        print_ensure(root, result)
+        for line in setup:
+            print(line)
         print('')
         if result['warnings']:
             for warning in result['warnings']:
