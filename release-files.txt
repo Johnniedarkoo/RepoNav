@@ -1,0 +1,40 @@
+# Exact source paths; additions require content review. No globs or optional files.
+README.md
+repo-nav.ps1
+graphify-state.py
+RepoNav.Tests.ps1
+RepoNav.Integration.Tests.ps1
+.gitignore
+release-files.txt
+prepare_snapshot.py
+test_prepare_snapshot.py
+PUBLICATION.md
+
+# B2.1 runtime guard and explicitly reviewed synthetic validation tools.
+preservation-state.py
+TestEnvironment.ps1
+TestEnvironment.Tests.ps1
+Preservation.Tests.ps1
+test_preservation.py
+Validate-B21.ps1
+benchmark_preservation.py
+
+# B2.2 state safety and explicitly reviewed synthetic validation.
+state_safety.py
+StateSafety.Tests.ps1
+test_state_safety.py
+Validate-B22.ps1
+benchmark_state_safety.py
+
+# B3.1 reviewed installation and read-only validation files.
+INSTALL.md
+repo-nav.cmd
+check_dependencies.py
+test_dependencies.py
+Validate-B31.ps1
+
+# B3.2 reviewed external-tool credits.
+THIRD_PARTY_NOTICES.md
+
+# B4 finalized original-code license.
+LICENSE

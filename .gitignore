@@ -1,0 +1,17 @@
+# Local navigation state, never release inputs.
+/.serena/
+/graphify-out/
+# Local audit reports and machine-specific configuration.
+/workflow-pollution-audit.md
+/REPONAV_PUBLICATION_AUDIT.md
+/DEPENDENCY_LICENSE_INVENTORY.md
+/.codex/
+/.claude/
+/.env
+/.env.local
+# Python/release-tool temporary state (snapshots must be outside this tree).
+__pycache__/
+*.pyc
+/.release-staging/
+/reponav-snapshot-*/
+/graphify-rebuild.log
