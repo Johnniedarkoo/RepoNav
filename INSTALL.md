@@ -93,3 +93,39 @@ RepoNav itself is not designed to upload source. AI clients may send repository 
 ## Integration release gate
 
 On a disposable Windows machine/account boundary, install the pinned tools, provision and verify one Python server without installer fallback, and run recognition/status/ensure/repeated ensure/change/refresh/delete/refresh. Confirm graph contents, unchanged policy/tracked files and preserved user configuration. Exercise refusal cases separately. Record actual tool/runtime/server versions and results. Until then, launch/status checks, source inspection and mocks must not be described as real indexing validation.
+
+# Linux and macOS installation
+
+The Unix entry point is the `repo-nav` launcher beside `repo_nav.py`. It keeps the Windows behaviour: the same commands, exact Serena 1.7.0 / Graphify 0.9.72 pins, interface checks, state-safety refusals and preservation guard, using the same Python helpers. Verified configurations: macOS 26 on Apple silicon (Git 2.50, ripgrep 15.2.0, uv 0.13.1) and Debian 13 in an arm64 container (Git 2.47, ripgrep 14.1.1, uv 0.13.1), both with Serena 1.7.0 on Python 3.13 and Graphify 0.9.72 on Python 3.12, including real Pyright indexing and Graphify build, stale detection, incremental refresh and deleted-file refresh.
+
+## Install
+
+Install Git, ripgrep and uv from your package manager or their official distributions (for example `brew install ripgrep uv`, or `apt install git ripgrep` plus the uv installer). Then, only when you intend to download and install the tools:
+
+```sh
+uv tool install --python 3.13 'serena-agent==1.7.0'
+uv tool install --python 3.12 'graphifyy==0.9.72'
+uv tool dir --bin        # make sure this directory is on PATH
+```
+
+Keep the RepoNav folder together and symlink the launcher onto PATH. The launcher follows the symlink to its own folder and keeps your current directory:
+
+```sh
+ln -s "$HOME/Tools/RepoNav/repo-nav" "$HOME/.local/bin/repo-nav"
+```
+
+Check that no existing `repo-nav` command is shadowed first (`command -v repo-nav`). Nothing edits PATH or shell profiles automatically.
+
+## Language servers
+
+The language-server precautions above apply unchanged. Serena's default Python server (Pyright) needs Node.js; on a minimal Linux image install `nodejs` first or indexing fails with "Language server stdout read process terminated unexpectedly". PHP uses Intelephense through npm. Use `repo-nav ensure --languages php,typescript` to start only the servers you have prepared; without the option RepoNav detects languages from tracked source files exactly as on Windows.
+
+## Differences from Windows
+
+- `.serena/` and `graphify-out/` are excluded through the repository's own `git rev-parse --git-path info/exclude`, never through a global `core.excludesFile`. `status` reports this as `Git excludes`.
+- Redirection checks use symbolic links (Unix has no reparse points). The system temporary directory is resolved first, because macOS `/tmp` and `/var` are themselves symbolic links.
+- Repository identity for `bootstrap-all` deduplication is the device and inode of the work-tree root.
+
+## Validation
+
+`./validate-unix.sh` runs every Python regression suite (state safety, preservation, dependencies, snapshot export and the Unix entry point) with Git, home, cache and tool state redirected into a disposable directory, mirroring `TestEnvironment.ps1`. It never installs software.

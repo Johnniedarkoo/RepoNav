@@ -38,3 +38,9 @@ THIRD_PARTY_NOTICES.md
 
 # B4 finalized original-code license.
 LICENSE
+
+# Linux/macOS entry point and its synthetic validation.
+repo-nav
+repo_nav.py
+test_repo_nav_unix.py
+validate-unix.sh

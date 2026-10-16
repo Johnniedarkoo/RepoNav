@@ -1,0 +1,30 @@
+#!/bin/sh
+# Unix launcher for RepoNav (Linux, macOS). Keeps the caller's directory and
+# runs RepoNav with the Graphify uv tool's Python, so no separate python on
+# PATH is needed. Symlink it onto PATH; the real file must stay beside its
+# sibling release files.
+set -eu
+self=$0
+while [ -L "$self" ]; do
+    target=$(readlink "$self")
+    case $target in
+        /*) self=$target ;;
+        *) self=$(dirname "$self")/$target ;;
+    esac
+done
+dir=$(cd "$(dirname "$self")" && pwd -P)
+python=
+if command -v uv >/dev/null 2>&1; then
+    tools=$(uv tool dir 2>/dev/null || true)
+    if [ -n "$tools" ] && [ -x "$tools/graphifyy/bin/python" ]; then
+        python=$tools/graphifyy/bin/python
+    fi
+fi
+if [ -z "$python" ]; then
+    python=$(command -v python3 || true)
+fi
+if [ -z "$python" ]; then
+    echo 'repo-nav error: Missing prerequisite: graphify (uv tool) or python3. See INSTALL.md. No software was installed.'
+    exit 1
+fi
+exec "$python" -B "$dir/repo_nav.py" "$@"
