@@ -9,8 +9,10 @@ import tomllib
 
 
 def check_version(actual, expected, name):
-    if actual != expected:
-        raise ValueError(f'{name}: supported version is {expected}; found {actual}. See INSTALL.md; no upgrade attempted.')
+    # expected is one version, or tested versions separated by '|'.
+    if actual not in expected.split('|'):
+        supported = ' or '.join(expected.split('|'))
+        raise ValueError(f'{name}: supported version is {supported}; found {actual}. See INSTALL.md; no upgrade attempted.')
 
 
 def check_launcher(prefix, name, executable):
@@ -52,7 +54,7 @@ def main():
         literals = {n.value for d in create.decorator_list for n in ast.walk(d) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         if not {'--ls', '--index'}.issubset(literals):
             raise ValueError('Unsupported Serena create CLI options')
-    print(f'{distribution} {expected}: uv environment and required interfaces verified')
+    print(f'{distribution} {metadata.version(distribution)}: uv environment and required interfaces verified')
 
 
 if __name__ == '__main__':

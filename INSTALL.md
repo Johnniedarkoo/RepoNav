@@ -126,6 +126,19 @@ The language-server precautions above apply unchanged. Serena's default Python s
 - Redirection checks use symbolic links (Unix has no reparse points). The system temporary directory is resolved first, because macOS `/tmp` and `/var` are themselves symbolic links.
 - Repository identity for `bootstrap-all` deduplication is the device and inode of the work-tree root.
 
+## Auto-refresh and agents
+
+Typical use in a repository, after the install above:
+
+```sh
+repo-nav setup --languages php,typescript   # hooks + ensure + Claude Code wiring
+repo-nav skill install                      # once per machine: Claude Code, Codex, pi, OpenClaw
+```
+
+`supported-versions.json` lists the Serena/Graphify pairs verified end to end; dependency checks on Unix accept any listed version and `repo-nav upgrade` installs the newest pair. Graphify 0.9.91 is verified on macOS with build, stale detection, refresh, deleted-file refresh and an upgrade from 0.9.72. Windows still enforces the original exact pins through `repo-nav.ps1`.
+
+The SessionStart hook and the skill only tell agents what exists and how to ask it. Independently launched Serena MCP servers stay outside RepoNav's protection boundary, as on Windows, and `agent install` registers Serena only for the repository it runs in.
+
 ## Validation
 
 `./validate-unix.sh` runs every Python regression suite (state safety, preservation, dependencies, snapshot export and the Unix entry point) with Git, home, cache and tool state redirected into a disposable directory, mirroring `TestEnvironment.ps1`. It never installs software.

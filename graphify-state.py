@@ -57,10 +57,19 @@ def inspect(root, read_only=True):
             "nodes": len(graph["nodes"]), "edges": len(graph.get("links", graph.get("edges", [])))}
 
 
+def supported_versions():
+    # Tested pairs live beside this adapter; the private APIs it calls are
+    # version-specific, so only listed versions are accepted.
+    path = Path(__file__).with_name("supported-versions.json")
+    tested = json.loads(path.read_text(encoding="utf-8"))["tested"]
+    return sorted({pair["graphifyy"] for pair in tested})
+
+
 def main():
     version = importlib.metadata.version("graphifyy")
-    if version != "0.9.72":
-        raise RuntimeError("RepoNav supports Graphify 0.9.72 only; see INSTALL.md")
+    supported = supported_versions()
+    if version not in supported:
+        raise RuntimeError(f"RepoNav supports Graphify {' or '.join(supported)} only; see INSTALL.md")
     root = Path(os.path.abspath(sys.argv[2]))
     with contextlib.redirect_stdout(io.StringIO()):
         state = inspect(root, read_only=sys.argv[1] == "status")

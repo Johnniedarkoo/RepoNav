@@ -18,7 +18,7 @@
 
 **With RepoNav:** use `status` to inspect, `ensure` to fill in missing state, and `refresh` when you want Graphify to update an existing graph. Use `bootstrap-all` for multiple repositories.
 
-RepoNav **does not install or replace Serena and Graphify**, combine them into a new search engine, or automatically keep graphs refreshed in the background. It coordinates separately installed tools and makes initialization, inspection, and maintenance explicit.
+RepoNav **does not install or replace Serena and Graphify** or combine them into a new search engine. It coordinates separately installed tools and makes initialization, inspection, and maintenance explicit. On Linux and macOS you can opt in to automatic refresh (Git-local hooks, agent start-up, a watch mode) and to telling coding agents about the graph; see [Auto-refresh and agents](#auto-refresh-and-agents-linux-and-macos).
 
 **v0.1.0 is an initial experimental release:** safe regression and launcher checks pass, but real Serena indexing and Graphify indexing/refresh after hardening remain unverified. Fresh-machine dependency installation is also unverified.
 
@@ -62,6 +62,21 @@ The full path works without a PATH change and preserves your current directory.
 | `status` | Reports tools and repository state without indexing or changing repository configuration. Temporary scan storage may be created. |
 | `refresh` | Explicitly asks Graphify to reconcile new, changed and deleted code through its native incremental operation. It does not reindex Serena or run a semantic/LLM refresh. |
 | `bootstrap-all [--dry-run] <root> [<root2> ...]` | Discovers repositories under supplied roots and processes them sequentially. Start with `--dry-run`. This processes repositories; it is not a dependency installer. |
+
+## Auto-refresh and agents (Linux and macOS)
+
+Opt-in commands of the Unix entry point. All of them run locally: refreshing re-parses changed code with tree-sitter, so it costs CPU but no model tokens, and none of them edits a tracked file.
+
+| Command | What it does |
+| --- | --- |
+| `setup [--languages a,b]` | `hooks install`, then `ensure`, then `agent install`: one command to make a repository ready. |
+| `hooks install \| uninstall \| status` | Adds a marked block to the repository's own `post-commit`, `post-merge`, `post-checkout` (branch switches only) and `post-rewrite` hooks that starts `refresh --background --quiet`. Existing shell hooks are kept (the block goes right after their shebang so an `exit 0` cannot skip it) and are restored byte for byte on uninstall; non-shell hooks and a `core.hooksPath` inside the work tree are refused. Worktrees without a graph ignore the hooks. |
+| `refresh --background` | Detaches the refresh, logs to `$(git rev-parse --git-path repo-nav.log)` and returns at once. A per-worktree lock serializes refreshes; a trigger during a running refresh queues one more pass. |
+| `agent install \| uninstall \| status` | Claude Code: adds a SessionStart hook to `.claude/settings.local.json` (refused when that file is tracked) that prints one line telling the agent the graph is there and how to query it, and starts a background refresh (a no-op when nothing changed). It returns at once, because checking freshness means loading the whole graph. Registers the Serena MCP server for this repository at Claude Code's local scope with the browser dashboard off. Uninstall removes only what it added. |
+| `skill install \| uninstall \| status` | Installs one user-wide `SKILL.md` (from `repo-nav-skill.md`) that tells agents to query the graph before grepping: `~/.agents/skills` (Agent Skills; pi, OpenCode and other compliant harnesses), `~/.claude/skills`, `~/.codex/skills`, and `~/.openclaw/skills` when OpenClaw is installed. Harnesses that drive these agents pick it up through them. Nothing in any repository changes. |
+| `watch [--debounce SECONDS]` | Foreground: refreshes after edits settle, using fswatch (macOS), inotifywait (Linux) or Git status polling. Optional; hooks and agent start-up cover most work. |
+| `upgrade [--dry-run]` | Moves Serena and Graphify to the newest pair listed in `supported-versions.json` (each pair verified end to end), re-runs the interface checks and restores the previous versions if they fail. Never automatic. |
+| `upgrade --self [--dry-run]` | Shows incoming RepoNav commits and fast-forwards a clean Git checkout of RepoNav. |
 
 ## Behavior, privacy and limits
 

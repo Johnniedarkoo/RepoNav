@@ -1,0 +1,17 @@
+{
+  "comment": "Serena/Graphify pairs verified end to end with RepoNav, oldest first. repo-nav upgrade installs the last pair; dependency checks accept any listed version. Serena 2.x (GPL-3.0-or-later) is deliberately not listed.",
+  "python": {
+    "serena-agent": "3.13",
+    "graphifyy": "3.12"
+  },
+  "tested": [
+    {
+      "serena-agent": "1.7.0",
+      "graphifyy": "0.9.72"
+    },
+    {
+      "serena-agent": "1.7.0",
+      "graphifyy": "0.9.91"
+    }
+  ]
+}
