@@ -28,6 +28,19 @@ The initial configuration is Windows PowerShell 5.1, Git for Windows, ripgrep (`
 
 Keep the source folder together under your user tools directory. Follow [INSTALL.md](INSTALL.md) for pinned Python runtimes, dependency installation and language-server precautions.
 
+## Linux and macOS setup
+
+`repo-nav` (a POSIX `sh` launcher) runs `repo_nav.py`, which ports the same commands, messages and refusal rules and reuses the same Python safety helpers. It needs Git, ripgrep, uv and the same pinned uv tools; no PowerShell. It runs with the Graphify tool's Python, so no separate `python` is needed on PATH. On Unix, RepoNav excludes `.serena/` and `graphify-out/` through the repository's own `.git/info/exclude` instead of setting a global `core.excludesFile`.
+
+Verified on macOS (Apple silicon) and Debian Linux (arm64 container) with real Serena 1.7.0 indexing (Pyright) and Graphify 0.9.72 build, stale detection and incremental refresh. See the Linux and macOS section of [INSTALL.md](INSTALL.md).
+
+```sh
+ln -s "$HOME/Tools/RepoNav/repo-nav" "$HOME/.local/bin/repo-nav"
+cd ~/src/some-repo
+repo-nav status
+repo-nav ensure                    # or: repo-nav ensure --languages php,typescript
+```
+
 ## First use
 
 After following INSTALL.md and preparing the selected language server, open a trusted Git working tree. This example assumes RepoNav is in `Tools/RepoNav` under your user profile:

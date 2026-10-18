@@ -35,11 +35,13 @@ def checked_chain(path, inspections):
     return path
 
 
-def safe_yaml(path):
+def safe_yaml(path, empty_ok=False):
     # This is the already-installed Serena dependency; no Serena module or
     # deserialization loader is imported. Unknown executable YAML tags fail.
     from ruamel.yaml import YAML
     data = YAML(typ='safe', pure=True).load(path.read_text(encoding='utf-8-sig'))
+    if data is None and empty_ok:
+        return {}
     if not isinstance(data, dict):
         raise StateSafetyError('Configuration must be a mapping')
     return data
@@ -139,7 +141,8 @@ def inspect_state(root, scope='all', operation='inspect'):
                         entry['index_safe'] = index_preserves_config(data)
                         local = directory / 'project.local.yml'
                         if local.is_file():
-                            safe_yaml(local)
+                            # Serena writes this override file as a comments-only template.
+                            safe_yaml(local, empty_ok=True)
                     elif entry['files']:
                         entry['category'] = 'unclear-ownership'
                 else:

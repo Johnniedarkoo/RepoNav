@@ -17,7 +17,7 @@ FORBIDDEN = {'.git', '.serena', 'graphify-out', '.codex', '.claude',
              '.venv', 'venv', 'node_modules', '__pycache__'}
 FORBIDDEN_FILES = {'workflow-pollution-audit.md', 'reponav_publication_audit.md',
                    'dependency_license_inventory.md'}
-TEXT_SUFFIXES = {'.md', '.ps1', '.py', '.txt', '.json'}
+TEXT_SUFFIXES = {'.md', '.ps1', '.py', '.sh', '.txt', '.json'}
 # One-way deny fingerprints avoid distributing reversible private identifiers.
 # These are privacy review markers, not credential hashes or a secrecy guarantee.
 PRIVATE_FINGERPRINTS = ((7, '3297c2f67a5806237006a2b5ae3a176a078178b0e1f430cf7f73987ebd251557'), (5, '497992d56d56de5e2b1176f67916f7aa09976be1506e850fb24d4c991b23baf3'), (15, '773cf23d0c41d105fae68c0653aa22d0c5c1d973ff6dae946a544ce8aeec9930'))
@@ -65,7 +65,7 @@ def relative_name(name):
                 or part.casefold() in FORBIDDEN_FILES
                 or re.fullmatch(r'(?i)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', part)):
             raise ValidationError('Unsafe or excluded manifest path')
-    if Path(name).suffix.lower() not in TEXT_SUFFIXES and name not in {'.gitignore', 'repo-nav.cmd', 'LICENSE'}:
+    if Path(name).suffix.lower() not in TEXT_SUFFIXES and name not in {'.gitignore', 'repo-nav.cmd', 'repo-nav', 'LICENSE'}:
         raise ValidationError('Non-source file type rejected')
     return name
 

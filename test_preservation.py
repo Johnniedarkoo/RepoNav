@@ -3,12 +3,28 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('preservation', Path(__file__).with_name('preservation-state.py'))
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
+
+
+def directory_link(link, target):
+    """Windows junction or, elsewhere, a directory symlink; False when unavailable."""
+    if os.name == 'nt':
+        return subprocess.run(['cmd','/c','mklink','/J',str(link),str(target)],capture_output=True).returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def remove_directory_link(link):
+    link.rmdir() if os.name == 'nt' else link.unlink()
 
 
 class PreservationTests(unittest.TestCase):
@@ -68,7 +84,7 @@ class PreservationTests(unittest.TestCase):
         self.verify(lambda: self.write('space caf\u00e9.txt', 'again'))
     def test_16_failure(self):
         before=self.state()
-        result=subprocess.run(['python', '-B', '-c', 'raise SystemExit(7)'])
+        result=subprocess.run([sys.executable, '-B', '-c', 'raise SystemExit(7)'])
         self.assertEqual(result.returncode,7); self.assertEqual(before,self.state())
     def test_17_separate_repositories(self):
         before=self.state(); other=self.root/'second'; other.mkdir()
@@ -97,19 +113,18 @@ class PreservationTests(unittest.TestCase):
     def test_link_no_traversal(self):
         outside=self.root/'outside'; outside.mkdir(); (outside/'AGENTS.md').write_text('baseline')
         link=self.root/'.codex'
-        result=subprocess.run(['cmd','/c','mklink','/J',str(link),str(outside)],capture_output=True)
-        if result.returncode: self.skipTest('Junction capability unavailable')
+        if not directory_link(link,outside): self.skipTest('Junction capability unavailable')
         try:
             before=self.state()
             self.assertTrue(before['P:.codex'].startswith('link:'))
             self.assertNotIn('P:.codex/AGENTS.md',before)
-        finally: link.rmdir()
+        finally: remove_directory_link(link)
 
     def test_raw_diff_reproduction(self):
         self.write('file.txt','dirty one\n')
         before=self.git('diff','--raw','--no-abbrev','--no-renames')
         baseline=self.state()
-        subprocess.check_call(['python','-B','-c','from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b"dirty two longer\\n")',str(self.root/'file.txt')])
+        subprocess.check_call([sys.executable,'-B','-c','from pathlib import Path; import sys; Path(sys.argv[1]).write_bytes(b"dirty two longer\\n")',str(self.root/'file.txt')])
         after=self.git('diff','--raw','--no-abbrev','--no-renames')
         self.assertEqual(before,after)  # Original guard compares only these rows.
         self.assertNotEqual(baseline,self.state())

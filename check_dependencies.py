@@ -4,6 +4,7 @@ import importlib.metadata as metadata
 import os
 from pathlib import Path
 import sys
+import sysconfig
 import tomllib
 
 
@@ -36,7 +37,8 @@ def main():
     check_version(metadata.version(distribution), expected, distribution)
     prefix = Path(sys.prefix)
     check_launcher(prefix, launcher, executable)
-    site = prefix / 'Lib/site-packages'
+    # Lib/site-packages on Windows, lib/pythonX.Y/site-packages on Unix.
+    site = Path(sysconfig.get_paths()['purelib'])
     if distribution == 'graphifyy':
         check_symbols((site / 'graphify/detect.py').read_text(encoding='utf-8'),
                       {'detect_incremental': ['manifest_path', 'cache_root'], 'classify_file': []})

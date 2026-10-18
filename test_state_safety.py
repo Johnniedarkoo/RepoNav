@@ -17,6 +17,21 @@ adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
 
 
+def directory_link(link, target):
+    """Windows junction or, elsewhere, a directory symlink; False when unavailable."""
+    if os.name == 'nt':
+        return subprocess.run(['cmd','/c','mklink','/J',str(link),str(target)],capture_output=True).returncode == 0
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        return False
+    return True
+
+
+def remove_directory_link(link):
+    link.rmdir() if os.name == 'nt' else link.unlink()
+
+
 class SafetyTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='state-safety-')
@@ -50,6 +65,14 @@ class SafetyTests(unittest.TestCase):
 
     def test_safe_yaml_malformed(self):
         self.write('.serena/project.yml','[not, a, mapping]')
+        with self.assertRaises(safety.StateSafetyError): safety.inspect_state(self.root,'serena')
+
+    def test_comment_only_local_override_accepted(self):
+        # Serena 1.7.0 creates project.local.yml as a commented template.
+        self.write('.serena/project.yml','project_name: x\nlanguage_servers: [python]\n')
+        self.write('.serena/project.local.yml','# local overrides\n')
+        self.assertTrue(safety.inspect_state(self.root,'serena')['serena']['config'])
+        self.write('.serena/project.local.yml','[not, a, mapping]')
         with self.assertRaises(safety.StateSafetyError): safety.inspect_state(self.root,'serena')
 
     def test_configuration_directory(self):
@@ -126,12 +149,11 @@ class SafetyTests(unittest.TestCase):
         outside=self.root/'outside'; outside.mkdir(); sentinel=outside/'sentinel'; sentinel.write_bytes(b'untouched')
         self.write('graphify-out/graph.json','{"nodes":[],"links":[]}')
         link=self.root/'graphify-out/cache'
-        result=subprocess.run(['cmd','/c','mklink','/J',str(link),str(outside)],capture_output=True)
-        if result.returncode: self.skipTest('Junction creation unavailable')
+        if not directory_link(link,outside): self.skipTest('Junction creation unavailable')
         try:
             with self.assertRaises(safety.StateSafetyError): adapter.inspect(self.root,read_only=False)
             self.assertEqual(sentinel.read_bytes(),b'untouched')
-        finally: link.rmdir()
+        finally: remove_directory_link(link)
 
     def test_nested_file_symlink(self):
         target=self.write('outside/sentinel','untouched')
@@ -156,11 +178,10 @@ class SafetyTests(unittest.TestCase):
 
     def test_root_alias_refused(self):
         target=self.root/'target'; target.mkdir(); link=self.root/'alias'
-        result=subprocess.run(['cmd','/c','mklink','/J',str(link),str(target)],capture_output=True)
-        if result.returncode: self.skipTest('Junction creation unavailable')
+        if not directory_link(link,target): self.skipTest('Junction creation unavailable')
         try:
             with self.assertRaises(safety.StateSafetyError): safety.inspect_state(link)
-        finally: link.rmdir()
+        finally: remove_directory_link(link)
 
 
 if __name__=='__main__': unittest.main(verbosity=2)
